@@ -1,0 +1,309 @@
+---
+title: "Cook County Housing Project"
+output: html_document
+author: Delvin Gambiza, Likhitha Kurella, Millicent Vimbai Muchepa 
+date: "2024-12-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#Total runtime < 10 minutes
+# Install and load packages
+install_if_missing <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, repos = 'http://cran.rstudio.com/')
+    library(package, character.only = TRUE)
+  }
+}
+
+```
+
+
+```{r}
+
+# List of required packages
+required_packages <- c("tidyverse", "caret", "randomForest", "data.table", "ggplot2", "scales", "MASS", "parallel", "doParallel")
+for (pkg in required_packages) install_if_missing(pkg)
+
+# Start timer to track runtime
+total_start_time <- Sys.time()
+
+# Parallel processing setup
+max_allowed_cores <- 112
+num_cores <- min(detectCores() - 1, max_allowed_cores)
+cat("Setting up parallel processing with", num_cores, "cores...\n")
+registerDoParallel(cores = num_cores)
+set.seed(123)
+```
+
+
+```{r pressure, echo=FALSE}
+# Load data
+cat("Loading data...\n")
+historic_data <- fread("historic_property_data.csv")
+predict_data <- fread("predict_property_data.csv")
+codebook <- fread("codebook.csv")
+
+# Handle outliers
+cat("\nHandling outliers...\n")
+historic_data[, sale_price := ifelse(sale_price > quantile(sale_price, 0.99), 
+                                     quantile(sale_price, 0.99), sale_price)]
+```
+
+
+```{r}
+# Feature engineering
+create_domain_features <- function(data) {
+  data[, `:=`(
+    #Create new features from existing features to avoid redundancy
+    building_coverage_ratio = ifelse(char_hd_sf > 0, char_bldg_sf / char_hd_sf, NA),
+    bath_bed_ratio = ifelse(char_beds > 0, char_fbath / char_beds, NA),
+    price_per_sqft = ifelse(char_bldg_sf > 0, meta_certified_est_bldg / char_bldg_sf, NA),
+    land_to_building = ifelse(meta_certified_est_bldg > 0, meta_certified_est_land / meta_certified_est_bldg, NA),
+    tax_per_sqft = ifelse(char_bldg_sf > 0, econ_tax_rate * char_bldg_sf, NA),
+    room_density = ifelse(char_bldg_sf > 0, char_rooms / char_bldg_sf, NA)
+  )]
+  for(col in names(data)) {
+    if(is.numeric(data[[col]])) {
+      data[!is.finite(data[[col]]) | is.nan(data[[col]]), (col) := NA]
+    }
+  }
+  #Convert char_age to categories
+  data[, age_category := as.numeric(as.factor(cut(
+    char_age, 
+    breaks = c(-Inf, 10, 25, 50, 75, Inf),
+    labels = c("New", "Recent", "Established", "Mature", "Historic")
+  )))]
+  #Median imputation of missing values
+  for(col in names(data)) {
+    if(is.numeric(data[[col]]) && any(is.na(data[[col]]))) {
+      median_val <- median(data[[col]], na.rm = TRUE)
+      data[is.na(get(col)), (col) := median_val]
+    }
+  }
+  return(data)
+}
+```
+
+
+```{r}
+cat("\nCreating features...\n")
+#Matching columns in both data sets using the newly created features
+historic_data <- create_domain_features(historic_data)
+predict_data <- create_domain_features(predict_data)
+
+# Log-transform target variable for normalization and to reduce skewness of the output
+historic_data[, log_price := log(sale_price)]
+
+# Feature selection, combines readily existing features with newly created ones
+top_features <- c(
+  "meta_certified_est_bldg", 
+  "meta_certified_est_land", 
+  "econ_tax_rate",
+  "char_bldg_sf",
+  "meta_nbhd",
+  "char_age",
+  "char_rooms",
+  "char_fbath",
+  "meta_town_code",
+  "econ_midincome",
+  "building_coverage_ratio",
+  "room_density",
+  "bath_bed_ratio",
+  "price_per_sqft",
+  "land_to_building",
+  "tax_per_sqft",
+  "age_category"
+)
+
+#Updating both datasets with selected features
+train_features <- historic_data[, ..top_features]
+predict_features <- predict_data[, ..top_features]
+train_target <- historic_data$log_price 
+
+```
+
+
+
+```{r pressure, echo=FALSE}
+# Splitting  train data into train and test data for model training and validation with 80% for training and 20% for validation
+cat("\nSplitting data...\n")
+trainIndex <- createDataPartition(train_target, p = 0.8, list = FALSE)
+X_train <- train_features[trainIndex]
+y_train <- train_target[trainIndex]
+X_val <- train_features[-trainIndex]
+y_val <- train_target[-trainIndex]
+
+# Train Random Forest model
+cat("\nTraining Random Forest model...\n")
+rf_model <- randomForest(
+  x = as.matrix(X_train), 
+  y = y_train, 
+  xtest = as.matrix(X_val), 
+  ytest = y_val, 
+  ntree = 70, 
+  mtry = 5, 
+  importance = TRUE, 
+  keep.forest = TRUE,
+  do.trace = TRUE
+)
+
+```
+
+```{r pressure, echo=FALSE}
+# Create the feature importance plot
+importance_plot <- ggplot(data = importance, aes(x = reorder(row.names(importance), MeanDecreaseAccuracy), y = MeanDecreaseAccuracy)) +
+   geom_bar(stat = "identity", fill = "blue") +
+   coord_flip() +
+   labs(title = "Feature Importance (Random Forest)", x = "Features", y = "Importance") +
+   theme_minimal()
+
+# Save the plot to a file
+ggsave("rf_feature_importance.png", plot = importance_plot)
+
+# Model validation using the 20% data
+cat("\nPredicting on validation set...\n")
+val_pred <- predict(rf_model, as.matrix(X_val))
+val_actual <- exp(y_val)
+val_pred_actual <- exp(val_pred)
+
+# Visualizations
+cat("\nGenerating plots...\n")
+actual_vs_pred <- ggplot(data.frame(Actual=val_actual, Predicted=val_pred_actual), aes(x=Actual, y=Predicted)) +
+   geom_point(alpha=0.5) +
+   geom_abline(color="red") +
+   labs(title="Actual vs Predicted Property Values", x="Actual Price ($)", y="Predicted Price ($)") +
+   theme_minimal() +
+   scale_x_continuous(labels=scales::dollar_format()) +
+   scale_y_continuous(labels=scales::dollar_format())
+ggsave("rf_actual_vs_predicted.png", actual_vs_pred)
+
+#Compute model metrics
+cat("\nCalculating performance metrics...\n")
+mse <- mean((val_actual - val_pred_actual)^2)
+rmse <- sqrt(mse)
+normalized_mse <- mse / (mean(val_actual))^2
+mape <- mean(abs((val_actual - val_pred_actual) / val_actual)) * 100
+
+summary_stats <- data.frame(
+   Metric = c("MSE", "RMSE", "Normalized MSE", "MAPE"),
+   Value = c(
+       format(mse, scientific=FALSE),
+       format(rmse, scientific=FALSE),
+       format(normalized_mse, digits=4),
+       paste0(format(mape, digits=4), "%")
+   )
+)
+fwrite(summary_stats, "rf_model_performance.csv")
+
+cat("\nValidation Metrics:\n")
+cat("MSE:", format(mse, scientific = FALSE), "\n")
+cat("RMSE:", format(rmse, scientific = FALSE), "\n")
+cat("Normalized MSE:", format(normalized_mse, scientific = FALSE), "\n")
+cat("MAPE:", round(mape, 2), "%\n")
+
+# Predictions on new data
+cat("\nPredicting on new data...\n")
+predictions <- predict(rf_model, as.matrix(predict_features))
+predictions <- exp(predictions)
+
+final_output <- data.table(
+   pid = predict_data$pid,
+   assessed_value = round(predictions, 2)
+)
+fwrite(final_output, "rf_assessed_value.csv", col.names = TRUE, quote = FALSE)
+
+# Display total runtime
+total_time <- difftime(Sys.time(), total_start_time, units = "mins")
+cat(sprintf("\nTotal runtime: %.2f minutes\n", total_time))
+stopImplicitCluster()
+```
+
+```{r pressure, echo=FALSE}
+# Analyze feature importance
+importance <- as.data.frame(importance(rf_model))
+colnames(importance) <- c("MeanDecreaseAccuracy", "MeanDecreaseGini")
+importance <- importance[order(-importance$MeanDecreaseAccuracy), ]
+fwrite(importance, "rf_feature_importance.csv")
+
+# Create the plot
+importance_plot <- ggplot(data = importance, aes(x = reorder(row.names(importance), MeanDecreaseAccuracy), y = MeanDecreaseAccuracy)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  coord_flip() +
+  labs(title = "Feature Importance (Random Forest)", x = "Features", y = "Importance") +
+  theme_minimal()
+
+# Save the plot
+ggsave("rf_feature_importance.png", plot = importance_plot)
+
+# Predictions
+cat("\nPredicting on validation set...\n")
+val_pred <- predict(rf_model, as.matrix(X_val))
+val_actual <- exp(y_val)
+val_pred_actual <- exp(val_pred)
+
+
+```
+
+```{r pressure, echo=FALSE}
+# Visualizations
+cat("\nGenerating plots...\n")
+actual_vs_pred <- ggplot(data.frame(Actual=val_actual, Predicted=val_pred_actual), aes(x=Actual, y=Predicted)) +
+  geom_point(alpha=0.5) +
+  geom_abline(color="red") +
+  labs(title="Actual vs Predicted Property Values", x="Actual Price ($)", y="Predicted Price ($)") +
+  theme_minimal() +
+  scale_x_continuous(labels=scales::dollar_format()) +
+  scale_y_continuous(labels=scales::dollar_format())
+ggsave("rf_actual_vs_predicted.png", actual_vs_pred)
+
+# Metrics
+cat("\nCalculating performance metrics...\n")
+mse <- mean((val_actual - val_pred_actual)^2)
+rmse <- sqrt(mse)
+normalized_mse <- mse / (mean(val_actual))^2
+mape <- mean(abs((val_actual - val_pred_actual) / val_actual)) * 100
+
+summary_stats <- data.frame(
+  Metric = c("MSE", "RMSE", "Normalized MSE", "MAPE"),
+  Value = c(
+    format(mse, scientific=FALSE),
+    format(rmse, scientific=FALSE),
+    format(normalized_mse, digits=4),
+    paste0(format(mape, digits=4), "%")
+  )
+)
+fwrite(summary_stats, "rf_model_performance.csv")
+
+cat("\nValidation Metrics:\n")
+cat("MSE:", format(mse, scientific = FALSE), "\n")
+cat("RMSE:", format(rmse, scientific = FALSE), "\n")
+cat("Normalized MSE:", format(normalized_mse, scientific = FALSE), "\n")
+cat("MAPE:", round(mape, 2), "%\n")
+
+# Predictions on new data
+cat("\nPredicting on new data...\n")
+predictions <- predict(rf_model, as.matrix(predict_features))
+predictions <- exp(predictions)
+
+# Ensure pid is formatted as a string with five digits
+final_output <- data.table(
+  pid = sprintf("%05d", predict_data$pid),  # Format as 5-digit strings
+  assessed_value = round(predictions, 2)
+)
+
+# Write the file as tab-separated for better column clarity
+fwrite(final_output, "rf_assessed_value.csv", sep = "\t", col.names = TRUE, quote = FALSE)
+
+# Display total runtime
+total_time <- difftime(Sys.time(), total_start_time, units = "mins")
+cat(sprintf("\nTotal runtime: %.2f minutes\n", total_time))
+stopImplicitCluster()
+
+```
+
+
+```{r pressure, echo=FALSE}
+
+
+```
