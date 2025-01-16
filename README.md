@@ -16,7 +16,7 @@ This project involves developing a machine learning model to predict residential
 ## 🔑 Highlights
 ### Data Preprocessing
 - **Data Cleaning**: Removed duplicates, handled missing values with median imputation, and addressed outliers.
-- **Feature Engineering**: Created derived variables such as price per square foot and tax rate.
+- **Feature Engineering**: Created derived variables such as price per square foot and tax rate and used these together with other readily existing variables defined in the codebook.csv file.
   
 ### Model Development
 - **Algorithm Used**: Random Forest
@@ -45,7 +45,14 @@ The Random Forest model provided a robust prediction of property prices with str
 ---
 
 ## 📂 Repository Contents
-- **property_price_prediction.py**: Python script containing the data preprocessing, model training, and evaluation steps.
+- **property_valuation,Rmd**: R script used to design the Random Forest model for property valuation
 - **property_data.csv**: The dataset used for training and testing the model.
 - **predictions.csv**: The output file containing predicted property prices.
 - **README.md**: Project documentation.
+
+---
+
+## 👏 Acknowledgements:
+This project is a result of successful collaboration with:
+1. Millicent Muchepa
+2. Likhitha Kurella
