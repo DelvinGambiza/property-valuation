@@ -48,6 +48,7 @@ The Random Forest model provided a robust prediction of property prices with str
 - **property_valuation,Rmd**: R script used to design the Random Forest model for property valuation
 - **property_data.csv**: The dataset used for training and testing the model.
 - **predictions.csv**: The output file containing predicted property prices.
+- **codebook.csv**: File containing definition of variables
 - **README.md**: Project documentation.
 
 ---
